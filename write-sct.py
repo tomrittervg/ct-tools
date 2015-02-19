@@ -4,15 +4,20 @@ import struct
 import base64
 import argparse
 
-AVIATOR_LOG_ID = base64.b64decode("aPaY+B9kgr46jO65KB1M/HFRXWeT1ETRCmesu09P+8Q=")
-PILOT_LOG_ID = base64.b64decode("pLkJkLQYWBSHuxOizGdwCjw1mAT5G9+443fNDsgN3BA=")
-ROCKETEER_LOG_ID = base64.b64decode("7ku9t3XOYLrhQmkfq+GeZqMPfl+wctiDAMR7iXqo/cs=")
+LOGS = {
+	'aviator' : base64.b64decode("aPaY+B9kgr46jO65KB1M/HFRXWeT1ETRCmesu09P+8Q="),
+	'pilot' : base64.b64decode("pLkJkLQYWBSHuxOizGdwCjw1mAT5G9+443fNDsgN3BA="),
+	'rocketeer' : base64.b64decode("7ku9t3XOYLrhQmkfq+GeZqMPfl+wctiDAMR7iXqo/cs="),
+	'digicert' : base64.b64decode("VhQGmi/XwuzT9eG9RLI+x0Z2ubyZEVzA75SYVdaJ0N0="),
+	'izenpen' : base64.b64decode("dGG0oJz7PUHXUVlXWy52SaRFqNJ3CbDMVkpkgrfrQaM="),
+	'certly' : base64.b64decode("zbUXm3/BwEb+6jETaj+PAC5hgvr4iW/syLL1tatgSQA=")
+}
 
 parser = argparse.ArgumentParser(description='Write a SCT')
 parser.add_argument("--out", type=argparse.FileType('w'), help="file to write out to")
 parser.add_argument("--stdout", action="store_true", help="write to stdout, to be used in echo \"...\" | base64 -d > file")
-parser.add_argument("--log", choices=['aviator', 'pilot', 'rocketeer'], required=True)
-parser.add_argument("--time", type=int, required=True, help="Timestamp from the JSON response.")
+parser.add_argument("--log", choices=['aviator', 'pilot', 'rocketeer', 'certly', 'digicert', 'izenpen'], required=True)
+parser.add_argument("--time", "--timestamp", type=int, required=True, help="Timestamp from the JSON response.")
 parser.add_argument("--sig", type=str, required=True, help="Signature value from the JSON response, base64 encoded")
 
 args = parser.parse_args()
@@ -27,14 +32,7 @@ sct = ""
 sct += "\x00"
 
 #SCT Log ID (32 Bytes)
-if args.log == "pilot":
-    sct += PILOT_LOG_ID
-elif args.log == "aviator":
-    sct += AVIATOR_LOG_ID
-elif args.log == "rocketeer":
-    sct += ROCKETEER_LOG_ID
-else:
-    raise Exception("Unhandled log!")
+sct += LOGS[args.log]
 
 if len(sct) != 33:
     raise Exception("SCT Building has gone wrong.")
