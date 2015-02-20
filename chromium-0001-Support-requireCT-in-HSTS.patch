@@ -1,0 +1,1210 @@
+From 41daba989e5d349be7bf7244d639bf053387f1d3 Mon Sep 17 00:00:00 2001
+From: Tom Ritter <tom@ritter.vg>
+Date: Tue, 10 Feb 2015 08:11:51 +0000
+Subject: [PATCH] Support "requireCT" in HSTS
+
+Patch to Chromium 42.0.2292.0 to support a "requireCT" directive for HSTS that requires at least one SCT to the present for a certificate presented for a domain.
+This patch is hardly complete - it doesn't add unit tests, it hasn't been tested on Android, it doesn't do anything to the preload list, it has a few TODOs marked around for things that are probably relevant. 
+But it serves as an adequate POC.
+---
+ chrome/app/generated_resources.grd                 |  10 ++
+ .../captive_portal/captive_portal_browsertest.cc   |   3 +-
+ chrome/browser/net/predictor_unittest.cc           |   4 +-
+ .../browser/resources/net_internals/hsts_view.js   |   4 +-
+ chrome/browser/ssl/ssl_error_info.cc               |   8 ++
+ chrome/browser/ssl/ssl_error_info.h                |   1 +
+ .../ui/webui/net_internals/net_internals_ui.cc     |   8 +-
+ chrome/common/localized_error.cc                   |   7 ++
+ chrome/renderer/security_filter_peer.cc            |   1 +
+ content/browser/ssl/ssl_policy.cc                  |   3 +
+ net/base/net_error_list.h                          |   6 +-
+ net/cert/cert_policy_enforcer.cc                   |  50 ++++++++-
+ net/cert/cert_policy_enforcer.h                    |  10 ++
+ net/cert/cert_status_flags.cc                      |   6 ++
+ net/cert/cert_status_flags_list.h                  |   1 +
+ net/http/http_security_headers.cc                  |  18 +++-
+ net/http/http_security_headers.h                   |   5 +-
+ net/http/http_security_headers_unittest.cc         | 120 +++++++++++----------
+ net/http/transport_security_persister.cc           |  11 ++
+ net/http/transport_security_state.cc               |  34 +++++-
+ net/http/transport_security_state.h                |  14 ++-
+ net/socket/ssl_client_socket_nss.cc                |  26 ++++-
+ net/socket/ssl_client_socket_nss.h                 |   2 +-
+ net/socket/ssl_client_socket_openssl.cc            |  28 ++++-
+ net/socket/ssl_client_socket_openssl.h             |   2 +-
+ net/spdy/spdy_session.cc                           |   2 +
+ net/url_request/url_request_http_job.cc            |  14 ++-
+ net/url_request/url_request_unittest.cc            |   6 +-
+ 28 files changed, 307 insertions(+), 97 deletions(-)
+
+diff --git a/chrome/app/generated_resources.grd b/chrome/app/generated_resources.grd
+index 8c42545..ded1099 100644
+--- a/chrome/app/generated_resources.grd
++++ b/chrome/app/generated_resources.grd
+@@ -9462,6 +9462,16 @@ I don't think this site should be blocked!
+         The server's certificate appears to be a forgery.
+       </message>
+ 
++      <message name="IDS_ERRORPAGES_HEADING_CTREQUIRED_FAILURE" desc="Title of the error page for a site that requires CT but omits it">
++        Missing Public Audit Records
++      </message>
++      <message name="IDS_ERRORPAGES_SUMMARY_CTREQUIRED_FAILURE" desc="Details of the error page for a site that requires CT but omits it">
++        The server presented a certificate that doesn't contain public audit records. These records are required for certain, high-security websites in order to protect you.
++      </message>
++      <message name="IDS_ERRORPAGES_DETAILS_CTREQUIRED_FAILURE" desc="Description of the error page for a site that requires CT but omits it">
++        The server's certificate is unauditable.
++      </message>
++
+       <message name="IDS_ERRORPAGES_DETAILS_SSL_UNSAFE_NEGOTIATION" desc="The error message displayed when the SSL renegotiation extension is missing.">
+         The SSL renegotiation extension was missing from the secure handshake. For some sites, which are known to support the renegotiation extension, Chrome requires a more secure handshake to prevent a class of known attacks. The omission of this extension suggests that your connection was intercepted and manipulated in transit.
+       </message>
+diff --git a/chrome/browser/captive_portal/captive_portal_browsertest.cc b/chrome/browser/captive_portal/captive_portal_browsertest.cc
+index 7fd8389..e970767 100644
+--- a/chrome/browser/captive_portal/captive_portal_browsertest.cc
++++ b/chrome/browser/captive_portal/captive_portal_browsertest.cc
+@@ -868,7 +868,8 @@ void AddHstsHost(net::URLRequestContextGetter* context_getter,
+ 
+   base::Time expiry = base::Time::Now() + base::TimeDelta::FromDays(1000);
+   bool include_subdomains = false;
+-  transport_security_state->AddHSTS(host, expiry, include_subdomains);
++  bool require_ct = false;
++  transport_security_state->AddHSTS(host, expiry, include_subdomains, require_ct);
+ }
+ 
+ }  // namespace
+diff --git a/chrome/browser/net/predictor_unittest.cc b/chrome/browser/net/predictor_unittest.cc
+index 4fa7dd9..1f8ea7d 100644
+--- a/chrome/browser/net/predictor_unittest.cc
++++ b/chrome/browser/net/predictor_unittest.cc
+@@ -722,7 +722,7 @@ TEST_F(PredictorTest, HSTSRedirect) {
+   const base::Time expiry =
+       base::Time::Now() + base::TimeDelta::FromSeconds(1000);
+   net::TransportSecurityState state;
+-  state.AddHSTS(kHttpUrl.host(), expiry, false);
++  state.AddHSTS(kHttpUrl.host(), expiry, false, false);
+ 
+   Predictor predictor(true, true);
+   TestPredictorObserver observer;
+@@ -747,7 +747,7 @@ TEST_F(PredictorTest, HSTSRedirectSubresources) {
+   const base::Time expiry =
+       base::Time::Now() + base::TimeDelta::FromSeconds(1000);
+   net::TransportSecurityState state;
+-  state.AddHSTS(kHttpUrl.host(), expiry, false);
++  state.AddHSTS(kHttpUrl.host(), expiry, false, false);
+ 
+   SimplePredictor predictor(true, true);
+   TestPredictorObserver observer;
+diff --git a/chrome/browser/resources/net_internals/hsts_view.js b/chrome/browser/resources/net_internals/hsts_view.js
+index 2310b9f..44a844c 100644
+--- a/chrome/browser/resources/net_internals/hsts_view.js
++++ b/chrome/browser/resources/net_internals/hsts_view.js
+@@ -120,10 +120,10 @@ var HSTSView = (function() {
+ 
+       var keys = [
+         'static_sts_domain', 'static_upgrade_mode',
+-        'static_sts_include_subdomains', 'static_sts_observed',
++        'static_sts_include_subdomains', 'static_sts_require_ct', 'static_sts_observed',
+         'static_pkp_domain', 'static_pkp_include_subdomains',
+         'static_pkp_observed', 'static_spki_hashes', 'dynamic_sts_domain',
+-        'dynamic_upgrade_mode', 'dynamic_sts_include_subdomains',
++        'dynamic_upgrade_mode', 'dynamic_sts_include_subdomains', 'dynamic_sts_require_ct',
+         'dynamic_sts_observed', 'dynamic_pkp_domain',
+         'dynamic_pkp_include_subdomains', 'dynamic_pkp_observed',
+         'dynamic_spki_hashes',
+diff --git a/chrome/browser/ssl/ssl_error_info.cc b/chrome/browser/ssl/ssl_error_info.cc
+index 80aaf9b..bf1e994 100644
+--- a/chrome/browser/ssl/ssl_error_info.cc
++++ b/chrome/browser/ssl/ssl_error_info.cc
+@@ -158,6 +158,12 @@ SSLErrorInfo SSLErrorInfo::CreateError(ErrorType error_type,
+       short_description = l10n_util::GetStringUTF16(
+           IDS_ERRORPAGES_DETAILS_PINNING_FAILURE);
+       break;
++    case CERT_MISSING_CT_RECORDS:
++      details = l10n_util::GetStringUTF16(
++          IDS_ERRORPAGES_SUMMARY_CTREQUIRED_FAILURE);
++      short_description = l10n_util::GetStringUTF16(
++          IDS_ERRORPAGES_DETAILS_CTREQUIRED_FAILURE);
++      break;
+     case UNKNOWN:
+       details = l10n_util::GetStringUTF16(IDS_CERT_ERROR_UNKNOWN_ERROR_DETAILS);
+       short_description =
+@@ -204,6 +210,8 @@ SSLErrorInfo::ErrorType SSLErrorInfo::NetErrorToErrorType(int net_error) {
+       return CERT_WEAK_KEY_DH;
+     case net::ERR_SSL_PINNED_KEY_NOT_IN_CERT_CHAIN:
+       return CERT_PINNED_KEY_MISSING;
++    case net::ERR_SSL_CERTIFICATE_NOT_VALIDATED_THROUGH_CT:
++      return CERT_MISSING_CT_RECORDS;
+     default:
+       NOTREACHED();
+       return UNKNOWN;
+diff --git a/chrome/browser/ssl/ssl_error_info.h b/chrome/browser/ssl/ssl_error_info.h
+index 2713374..aa7f6bd 100644
+--- a/chrome/browser/ssl/ssl_error_info.h
++++ b/chrome/browser/ssl/ssl_error_info.h
+@@ -37,6 +37,7 @@ class SSLErrorInfo {
+     CERT_WEAK_KEY_DH,
+     CERT_PINNED_KEY_MISSING,
+     CERT_VALIDITY_TOO_LONG,
++    CERT_MISSING_CT_RECORDS,
+     END_OF_ENUM
+   };
+ 
+diff --git a/chrome/browser/ui/webui/net_internals/net_internals_ui.cc b/chrome/browser/ui/webui/net_internals/net_internals_ui.cc
+index 93022ab..5bb53a2 100644
+--- a/chrome/browser/ui/webui/net_internals/net_internals_ui.cc
++++ b/chrome/browser/ui/webui/net_internals/net_internals_ui.cc
+@@ -804,6 +804,8 @@ void NetInternalsMessageHandler::IOThreadImpl::OnHSTSQuery(
+                            static_cast<int>(static_state.sts.upgrade_mode));
+         result->SetBoolean("static_sts_include_subdomains",
+                            static_state.sts.include_subdomains);
++        result->SetBoolean("static_sts_require_ct",
++                           static_state.sts.require_ct);
+         result->SetDouble("static_sts_observed",
+                           static_state.sts.last_observed.ToDoubleT());
+         result->SetDouble("static_sts_expiry",
+@@ -831,6 +833,8 @@ void NetInternalsMessageHandler::IOThreadImpl::OnHSTSQuery(
+                            static_cast<int>(dynamic_state.sts.upgrade_mode));
+         result->SetBoolean("dynamic_sts_include_subdomains",
+                            dynamic_state.sts.include_subdomains);
++        result->SetBoolean("dynamic_sts_require_ct",
++                           dynamic_state.sts.require_ct);
+         result->SetBoolean("dynamic_pkp_include_subdomains",
+                            dynamic_state.pkp.include_subdomains);
+         result->SetDouble("dynamic_sts_observed",
+@@ -867,6 +871,8 @@ void NetInternalsMessageHandler::IOThreadImpl::OnHSTSAdd(
+   }
+   bool sts_include_subdomains;
+   CHECK(list->GetBoolean(1, &sts_include_subdomains));
++  bool sts_require_ct = false;
++  //TODO: Track down this list thing and make it support requireCT
+   bool pkp_include_subdomains;
+   CHECK(list->GetBoolean(2, &pkp_include_subdomains));
+   std::string hashes_str;
+@@ -884,7 +890,7 @@ void NetInternalsMessageHandler::IOThreadImpl::OnHSTSAdd(
+       return;
+   }
+ 
+-  transport_security_state->AddHSTS(domain, expiry, sts_include_subdomains);
++  transport_security_state->AddHSTS(domain, expiry, sts_include_subdomains, sts_require_ct);
+   transport_security_state->AddHPKP(domain, expiry, pkp_include_subdomains,
+                                     hashes);
+ }
+diff --git a/chrome/common/localized_error.cc b/chrome/common/localized_error.cc
+index 5472b77..b82a8ba 100644
+--- a/chrome/common/localized_error.cc
++++ b/chrome/common/localized_error.cc
+@@ -263,6 +263,13 @@ const LocalizedErrorMap net_error_options[] = {
+    IDS_ERRORPAGES_DETAILS_SSL_PROTOCOL_ERROR,
+    SUGGEST_LEARNMORE,
+   },
++  {net::ERR_SSL_CERTIFICATE_NOT_VALIDATED_THROUGH_CT,
++   IDS_ERRORPAGES_TITLE_LOAD_FAILED,
++   IDS_ERRORPAGES_HEADING_CTREQUIRED_FAILURE,
++   IDS_ERRORPAGES_SUMMARY_CTREQUIRED_FAILURE,
++   IDS_ERRORPAGES_DETAILS_CTREQUIRED_FAILURE,
++   SUGGEST_NONE,
++  },
+   {net::ERR_SSL_PINNED_KEY_NOT_IN_CERT_CHAIN,
+    IDS_ERRORPAGES_TITLE_LOAD_FAILED,
+    IDS_ERRORPAGES_HEADING_PINNING_FAILURE,
+diff --git a/chrome/renderer/security_filter_peer.cc b/chrome/renderer/security_filter_peer.cc
+index e43e7ec..218151c 100644
+--- a/chrome/renderer/security_filter_peer.cc
++++ b/chrome/renderer/security_filter_peer.cc
+@@ -40,6 +40,7 @@ SecurityFilterPeer::CreateSecurityFilterPeerForDeniedRequest(
+     case net::ERR_CERT_NAME_CONSTRAINT_VIOLATION:
+     case net::ERR_INSECURE_RESPONSE:
+     case net::ERR_SSL_PINNED_KEY_NOT_IN_CERT_CHAIN:
++    case net::ERR_SSL_CERTIFICATE_NOT_VALIDATED_THROUGH_CT:
+       if (content::IsResourceTypeFrame(resource_type))
+         return CreateSecurityFilterPeerForFrame(peer, os_error);
+       // Any other content is entirely filtered-out.
+diff --git a/content/browser/ssl/ssl_policy.cc b/content/browser/ssl/ssl_policy.cc
+index 610f741..f5d86e5 100644
+--- a/content/browser/ssl/ssl_policy.cc
++++ b/content/browser/ssl/ssl_policy.cc
+@@ -79,6 +79,7 @@ void SSLPolicy::OnCertError(SSLCertErrorHandler* handler) {
+     case net::ERR_CERT_INVALID:
+     case net::ERR_SSL_WEAK_SERVER_EPHEMERAL_DH_KEY:
+     case net::ERR_SSL_PINNED_KEY_NOT_IN_CERT_CHAIN:
++    case net::ERR_SSL_CERTIFICATE_NOT_VALIDATED_THROUGH_CT:
+       if (handler->fatal())
+         options_mask |= STRICT_ENFORCEMENT;
+       if (expired_previous_decision)
+@@ -110,6 +111,7 @@ void SSLPolicy::OnRequestStarted(SSLRequestInfo* info) {
+   // this information back through WebKit and out some FrameLoaderClient
+   // methods.
+ 
++  //TODO Make need to tie in CT here
+   if (net::IsCertStatusError(info->ssl_cert_status()))
+     backend_->HostRanInsecureContent(info->url().host(), info->child_id());
+ }
+@@ -137,6 +139,7 @@ void SSLPolicy::UpdateEntry(NavigationEntryImpl* entry,
+   if (web_contents->DisplayedInsecureContent())
+     entry->GetSSL().content_status |= SSLStatus::DISPLAYED_INSECURE_CONTENT;
+ 
++  //TODO May need to add CT here
+   if (net::IsCertStatusError(entry->GetSSL().cert_status)) {
+     // Minor errors don't lower the security style to
+     // SECURITY_STYLE_AUTHENTICATION_BROKEN.
+diff --git a/net/base/net_error_list.h b/net/base/net_error_list.h
+index e1d65e1..328568b 100644
+--- a/net/base/net_error_list.h
++++ b/net/base/net_error_list.h
+@@ -443,13 +443,17 @@ NET_ERROR(CERT_NAME_CONSTRAINT_VIOLATION, -212)
+ // The certificate's validity period is too long.
+ NET_ERROR(CERT_VALIDITY_TOO_LONG, -213)
+ 
++// The SSL server requires falling back to a version older than the configured
++// minimum fallback version, and thus fallback failed.
++NET_ERROR(SSL_CERTIFICATE_NOT_VALIDATED_THROUGH_CT, -214)
++
+ // Add new certificate error codes here.
+ //
+ // Update the value of CERT_END whenever you add a new certificate error
+ // code.
+ 
+ // The value immediately past the last certificate error code.
+-NET_ERROR(CERT_END, -214)
++NET_ERROR(CERT_END, -215)
+ 
+ // The URL is invalid.
+ NET_ERROR(INVALID_URL, -300)
+diff --git a/net/cert/cert_policy_enforcer.cc b/net/cert/cert_policy_enforcer.cc
+index 25e9325..9762013 100644
+--- a/net/cert/cert_policy_enforcer.cc
++++ b/net/cert/cert_policy_enforcer.cc
+@@ -59,7 +59,13 @@ uint32_t ApproximateMonthDifference(const base::Time& start,
+   return month_diff;
+ }
+ 
+-bool HasRequiredNumberOfSCTs(const X509Certificate& cert,
++bool HasRequiredNumberOfSCTsForCTRequired(const X509Certificate& cert,
++                             const ct::CTVerifyResult& ct_result) {
++    // For now, let's not set up a big complicated policy for this.
++    return ct_result.verified_scts.size() >= 1;
++}
++
++bool HasRequiredNumberOfSCTsForEVPolicy(const X509Certificate& cert,
+                              const ct::CTVerifyResult& ct_result) {
+   // TODO(eranm): Count the number of *independent* SCTs once the information
+   // about log operators is available, crbug.com/425174
+@@ -204,7 +210,24 @@ void CheckCTEVPolicyCompliance(X509Certificate* cert,
+     return;
+   }
+ 
+-  if (HasRequiredNumberOfSCTs(*cert, ct_result)) {
++  if (HasRequiredNumberOfSCTsForEVPolicy(*cert, ct_result)) {
++    result->status = CT_ENOUGH_SCTS;
++    return;
++  }
++
++  result->status = CT_NOT_COMPLIANT;
++}
++
++void CheckCTRequiredPolicyCompliance(X509Certificate* cert,
++                               const ct::CTVerifyResult& ct_result,
++                               ComplianceDetails* result) {
++  result->ct_presence_required = true;
++
++  if (!IsBuildTimely())
++    return;
++  result->build_timely = true;
++
++  if (HasRequiredNumberOfSCTsForCTRequired(*cert, ct_result)) {
+     result->status = CT_ENOUGH_SCTS;
+     return;
+   }
+@@ -252,4 +275,27 @@ bool CertPolicyEnforcer::DoesConformToCTEVPolicy(
+   return false;
+ }
+ 
++bool CertPolicyEnforcer::DoesConformToCTRequiredPolicy(
++    X509Certificate* cert,
++    const ct::CTVerifyResult& ct_result,
++    const BoundNetLog& net_log) {
++  ComplianceDetails details;
++  CheckCTRequiredPolicyCompliance(cert, ct_result, &details);
++
++  if (!details.ct_presence_required)
++    return true;
++
++  // Returning false here would be bad. We'd be failing _closed_ for
++  // these sites, rather than just stripping the EV indicator. 
++  // So instead fail open.  (And hope that Chrome does something about
++  // not being able to update for 10 weeks...)
++  if (!details.build_timely)
++    return true;
++
++  if (details.status == CT_ENOUGH_SCTS)
++    return true;
++
++  return false;
++}
++
+ }  // namespace net
+diff --git a/net/cert/cert_policy_enforcer.h b/net/cert/cert_policy_enforcer.h
+index 5d6b64b..181482e 100644
+--- a/net/cert/cert_policy_enforcer.h
++++ b/net/cert/cert_policy_enforcer.h
+@@ -41,6 +41,16 @@ class NET_EXPORT CertPolicyEnforcer {
+                                const ct::CTVerifyResult& ct_result,
+                                const BoundNetLog& net_log);
+ 
++  // Returns true if the collection of SCTs for the given certificate
++  // conforms with the CT Policy for domains that have opted into 'CT Required'
++  // processing.  
++  // |cert| is the certificate for which the SCTs apply.
++  // |ct_result| must contain the result of verifying any SCTs associated with
++  // |cert| prior to invoking this method.
++  bool DoesConformToCTRequiredPolicy(
++                               X509Certificate* cert,
++                               const ct::CTVerifyResult& ct_result,
++                               const BoundNetLog& net_log);
+  private:
+   bool require_ct_for_ev_;
+ };
+diff --git a/net/cert/cert_status_flags.cc b/net/cert/cert_status_flags.cc
+index e8d9aab..ef271a1 100644
+--- a/net/cert/cert_status_flags.cc
++++ b/net/cert/cert_status_flags.cc
+@@ -47,6 +47,8 @@ CertStatus MapNetErrorToCertStatus(int error) {
+       return CERT_STATUS_WEAK_KEY;
+     case ERR_SSL_PINNED_KEY_NOT_IN_CERT_CHAIN:
+       return CERT_STATUS_PINNED_KEY_MISSING;
++    case ERR_SSL_CERTIFICATE_NOT_VALIDATED_THROUGH_CT:
++      return CERT_STATUS_CT_RECORDS_UNAVAILABLE;
+     case ERR_CERT_NAME_CONSTRAINT_VIOLATION:
+       return CERT_STATUS_NAME_CONSTRAINT_VIOLATION;
+     case ERR_CERT_VALIDITY_TOO_LONG:
+@@ -68,6 +70,10 @@ int MapCertStatusToNetError(CertStatus cert_status) {
+   if (cert_status & CERT_STATUS_PINNED_KEY_MISSING)
+     return ERR_SSL_PINNED_KEY_NOT_IN_CERT_CHAIN;
+ 
++  // May or may not be enforced
++  if (cert_status & CERT_STATUS_CT_RECORDS_UNAVAILABLE)
++    return ERR_SSL_CERTIFICATE_NOT_VALIDATED_THROUGH_CT;
++
+   // Recoverable errors
+   if (cert_status & CERT_STATUS_AUTHORITY_INVALID)
+     return ERR_CERT_AUTHORITY_INVALID;
+diff --git a/net/cert/cert_status_flags_list.h b/net/cert/cert_status_flags_list.h
+index 932e938..27ffa58 100644
+--- a/net/cert/cert_status_flags_list.h
++++ b/net/cert/cert_status_flags_list.h
+@@ -31,3 +31,4 @@ CERT_STATUS_FLAG(IS_EV, 1 << 16)
+ CERT_STATUS_FLAG(REV_CHECKING_ENABLED, 1 << 17)
+ // Bit 18 was CERT_STATUS_IS_DNSSEC
+ CERT_STATUS_FLAG(SHA1_SIGNATURE_PRESENT, 1 << 19)
++CERT_STATUS_FLAG(CT_RECORDS_UNAVAILABLE, 1 << 20)
+diff --git a/net/http/http_security_headers.cc b/net/http/http_security_headers.cc
+index aff4a30..8256f0a
+--- a/net/http/http_security_headers.cc
++++ b/net/http/http_security_headers.cc
+@@ -169,14 +169,18 @@ bool ParseAndAppendPin(const std::string& value,
+ //     through 4), the UA MUST process the recognized directives.
+ bool ParseHSTSHeader(const std::string& value,
+                      base::TimeDelta* max_age,
+-                     bool* include_subdomains) {
++                     bool* include_subdomains,
++                     bool* require_ct) {
+   uint32 max_age_candidate = 0;
+   bool include_subdomains_candidate = false;
++  bool require_ct_candidate = false;
+ 
+   // We must see max-age exactly once.
+   int max_age_observed = 0;
+   // We must see includeSubdomains exactly 0 or 1 times.
+   int include_subdomains_observed = 0;
++  // We must see requireCT exactly 0 or 1 times.
++  int require_ct_observed = 0;
+ 
+   enum ParserState {
+     START,
+@@ -184,6 +188,7 @@ bool ParseHSTSHeader(const std::string& value,
+     AFTER_MAX_AGE_EQUALS,
+     AFTER_MAX_AGE,
+     AFTER_INCLUDE_SUBDOMAINS,
++	AFTER_REQUIRE_CT,
+     AFTER_UNKNOWN_LABEL,
+     DIRECTIVE_END
+   } state = START;
+@@ -207,6 +212,11 @@ bool ParseHSTSHeader(const std::string& value,
+           state = AFTER_INCLUDE_SUBDOMAINS;
+           include_subdomains_observed++;
+           include_subdomains_candidate = true;
++        } else if (LowerCaseEqualsASCII(tokenizer.token(),
++                                        "requirect")) {
++          state = AFTER_REQUIRE_CT;
++          require_ct_observed++;
++          require_ct_candidate = true;
+         } else {
+           state = AFTER_UNKNOWN_LABEL;
+         }
+@@ -232,6 +242,7 @@ bool ParseHSTSHeader(const std::string& value,
+ 
+       case AFTER_MAX_AGE:
+       case AFTER_INCLUDE_SUBDOMAINS:
++	  case AFTER_REQUIRE_CT:
+         if (IsAsciiWhitespace(*tokenizer.token_begin()))
+           continue;
+         else if (*tokenizer.token_begin() == ';')
+@@ -251,7 +262,8 @@ bool ParseHSTSHeader(const std::string& value,
+ 
+   // We've consumed all the input.  Let's see what state we ended up in.
+   if (max_age_observed != 1 ||
+-      (include_subdomains_observed != 0 && include_subdomains_observed != 1)) {
++      (include_subdomains_observed != 0 && include_subdomains_observed != 1) ||
++	  (require_ct_observed != 0 && require_ct_observed != 1)) {
+     return false;
+   }
+ 
+@@ -259,9 +271,11 @@ bool ParseHSTSHeader(const std::string& value,
+     case DIRECTIVE_END:
+     case AFTER_MAX_AGE:
+     case AFTER_INCLUDE_SUBDOMAINS:
++	case AFTER_REQUIRE_CT:
+     case AFTER_UNKNOWN_LABEL:
+       *max_age = base::TimeDelta::FromSeconds(max_age_candidate);
+       *include_subdomains = include_subdomains_candidate;
++	  *require_ct = require_ct_candidate;
+       return true;
+     case START:
+     case AFTER_MAX_AGE_LABEL:
+diff --git a/net/http/http_security_headers.h b/net/http/http_security_headers.h
+index 12e6be9..2ede208
+--- a/net/http/http_security_headers.h
++++ b/net/http/http_security_headers.h
+@@ -19,7 +19,7 @@ namespace net {
+ const int64 kMaxHSTSAgeSecs = 86400 * 365;  // 1 year
+ 
+ // Parses |value| as a Strict-Transport-Security header value. If successful,
+-// returns true and sets |*max_age| and |*include_subdomains|.
++// returns true and sets |*max_age|, |*include_subdomains|, and |*require_ct|.
+ // Otherwise returns false and leaves the output parameters unchanged.
+ //
+ // value is the right-hand side of:
+@@ -28,7 +28,8 @@ const int64 kMaxHSTSAgeSecs = 86400 * 365;  // 1 year
+ //     [ directive ]  *( ";" [ directive ] )
+ bool NET_EXPORT_PRIVATE ParseHSTSHeader(const std::string& value,
+                                         base::TimeDelta* max_age,
+-                                        bool* include_subdomains);
++                                        bool* include_subdomains,
++										bool* require_ct);
+ 
+ // Parses |value| as a Public-Key-Pins header value. If successful, returns
+ // true and populates the |*max_age|, |*include_subdomains|, and |*hashes|
+diff --git a/net/http/http_security_headers_unittest.cc b/net/http/http_security_headers_unittest.cc
+index 234c5f0..d97cb78
+--- a/net/http/http_security_headers_unittest.cc
++++ b/net/http/http_security_headers_unittest.cc
+@@ -70,75 +70,76 @@ class HttpSecurityHeadersTest : public testing::Test {
+ TEST_F(HttpSecurityHeadersTest, BogusHeaders) {
+   base::TimeDelta max_age;
+   bool include_subdomains = false;
++  bool require_ct = false;
+ 
+   EXPECT_FALSE(
+-      ParseHSTSHeader(std::string(), &max_age, &include_subdomains));
+-  EXPECT_FALSE(ParseHSTSHeader("    ", &max_age, &include_subdomains));
+-  EXPECT_FALSE(ParseHSTSHeader("abc", &max_age, &include_subdomains));
+-  EXPECT_FALSE(ParseHSTSHeader("  abc", &max_age, &include_subdomains));
+-  EXPECT_FALSE(ParseHSTSHeader("  abc   ", &max_age, &include_subdomains));
+-  EXPECT_FALSE(ParseHSTSHeader("max-age", &max_age, &include_subdomains));
++      ParseHSTSHeader(std::string(), &max_age, &include_subdomains, &require_ct));
++  EXPECT_FALSE(ParseHSTSHeader("    ", &max_age, &include_subdomains, &require_ct));
++  EXPECT_FALSE(ParseHSTSHeader("abc", &max_age, &include_subdomains, &require_ct));
++  EXPECT_FALSE(ParseHSTSHeader("  abc", &max_age, &include_subdomains, &require_ct));
++  EXPECT_FALSE(ParseHSTSHeader("  abc   ", &max_age, &include_subdomains, &require_ct));
++  EXPECT_FALSE(ParseHSTSHeader("max-age", &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("  max-age", &max_age,
+-                               &include_subdomains));
++                               &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("  max-age  ", &max_age,
+-                               &include_subdomains));
+-  EXPECT_FALSE(ParseHSTSHeader("max-age=", &max_age, &include_subdomains));
++                               &include_subdomains, &require_ct));
++  EXPECT_FALSE(ParseHSTSHeader("max-age=", &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("   max-age=", &max_age,
+-                               &include_subdomains));
++                               &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("   max-age  =", &max_age,
+-                               &include_subdomains));
++                               &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("   max-age=   ", &max_age,
+-                               &include_subdomains));
++                               &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("   max-age  =     ", &max_age,
+-                               &include_subdomains));
++                               &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("   max-age  =     xy", &max_age,
+-                               &include_subdomains));
++                               &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("   max-age  =     3488a923", &max_age,
+-                               &include_subdomains));
++                               &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-age=3488a923  ", &max_age,
+-                               &include_subdomains));
++                               &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-ag=3488923", &max_age,
+-                               &include_subdomains));
++                               &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-aged=3488923", &max_age,
+-                               &include_subdomains));
++                               &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-age==3488923", &max_age,
+-                               &include_subdomains));
++                               &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("amax-age=3488923", &max_age,
+-                               &include_subdomains));
++                               &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-age=-3488923", &max_age,
+-                               &include_subdomains));
++                               &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-age=3488923     e", &max_age,
+-                               &include_subdomains));
++                               &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-age=3488923     includesubdomain",
+-                               &max_age, &include_subdomains));
++                               &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-age=3488923includesubdomains",
+-                               &max_age, &include_subdomains));
++                               &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-age=3488923=includesubdomains",
+-                               &max_age, &include_subdomains));
++                               &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-age=3488923 includesubdomainx",
+-                               &max_age, &include_subdomains));
++                               &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-age=3488923 includesubdomain=",
+-                               &max_age, &include_subdomains));
++                               &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-age=3488923 includesubdomain=true",
+-                               &max_age, &include_subdomains));
++                               &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-age=3488923 includesubdomainsx",
+-                               &max_age, &include_subdomains));
++                               &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-age=3488923 includesubdomains x",
+-                               &max_age, &include_subdomains));
++                               &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-age=34889.23 includesubdomains",
+-                               &max_age, &include_subdomains));
++                               &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-age=34889 includesubdomains",
+-                               &max_age, &include_subdomains));
++                               &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader(";;;; ;;;",
+-                               &max_age, &include_subdomains));
++                               &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader(";;;; includeSubDomains;;;",
+-                               &max_age, &include_subdomains));
++                               &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("   includeSubDomains;  ",
+-                               &max_age, &include_subdomains));
++                               &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader(";",
+-                               &max_age, &include_subdomains));
++                               &max_age, &include_subdomains, &require_ct));
+   EXPECT_FALSE(ParseHSTSHeader("max-age; ;",
+-                               &max_age, &include_subdomains));
++                               &max_age, &include_subdomains, &require_ct));
+ 
+   // Check the out args were not updated by checking the default
+   // values for its predictable fields.
+@@ -245,90 +246,91 @@ TEST_F(HttpSecurityHeadersTest, ValidSTSHeaders) {
+   base::TimeDelta max_age;
+   base::TimeDelta expect_max_age;
+   bool include_subdomains = false;
++  bool require_ct = false;
+ 
+   EXPECT_TRUE(ParseHSTSHeader("max-age=243", &max_age,
+-                              &include_subdomains));
++                              &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(243);
+   EXPECT_EQ(expect_max_age, max_age);
+   EXPECT_FALSE(include_subdomains);
+ 
+   EXPECT_TRUE(ParseHSTSHeader("max-age=3488923;", &max_age,
+-                              &include_subdomains));
++                              &include_subdomains, &require_ct));
+ 
+   EXPECT_TRUE(ParseHSTSHeader("  Max-agE    = 567", &max_age,
+-                              &include_subdomains));
++                              &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(567);
+   EXPECT_EQ(expect_max_age, max_age);
+   EXPECT_FALSE(include_subdomains);
+ 
+   EXPECT_TRUE(ParseHSTSHeader("  mAx-aGe    = 890      ", &max_age,
+-                              &include_subdomains));
++                              &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(890);
+   EXPECT_EQ(expect_max_age, max_age);
+   EXPECT_FALSE(include_subdomains);
+ 
+   EXPECT_TRUE(ParseHSTSHeader("max-age=123;incLudesUbdOmains", &max_age,
+-                              &include_subdomains));
++                              &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(123);
+   EXPECT_EQ(expect_max_age, max_age);
+   EXPECT_TRUE(include_subdomains);
+ 
+   EXPECT_TRUE(ParseHSTSHeader("incLudesUbdOmains; max-age=123", &max_age,
+-                              &include_subdomains));
++                              &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(123);
+   EXPECT_EQ(expect_max_age, max_age);
+   EXPECT_TRUE(include_subdomains);
+ 
+   EXPECT_TRUE(ParseHSTSHeader("   incLudesUbdOmains; max-age=123",
+-                              &max_age, &include_subdomains));
++                              &max_age, &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(123);
+   EXPECT_EQ(expect_max_age, max_age);
+   EXPECT_TRUE(include_subdomains);
+ 
+   EXPECT_TRUE(ParseHSTSHeader(
+       "   incLudesUbdOmains; max-age=123; pumpkin=kitten", &max_age,
+-                                   &include_subdomains));
++                                   &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(123);
+   EXPECT_EQ(expect_max_age, max_age);
+   EXPECT_TRUE(include_subdomains);
+ 
+   EXPECT_TRUE(ParseHSTSHeader(
+       "   pumpkin=894; incLudesUbdOmains; max-age=123  ", &max_age,
+-                                   &include_subdomains));
++                                   &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(123);
+   EXPECT_EQ(expect_max_age, max_age);
+   EXPECT_TRUE(include_subdomains);
+ 
+   EXPECT_TRUE(ParseHSTSHeader(
+       "   pumpkin; incLudesUbdOmains; max-age=123  ", &max_age,
+-                                   &include_subdomains));
++                                   &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(123);
+   EXPECT_EQ(expect_max_age, max_age);
+   EXPECT_TRUE(include_subdomains);
+ 
+   EXPECT_TRUE(ParseHSTSHeader(
+       "   pumpkin; incLudesUbdOmains; max-age=\"123\"  ", &max_age,
+-                                   &include_subdomains));
++                                   &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(123);
+   EXPECT_EQ(expect_max_age, max_age);
+   EXPECT_TRUE(include_subdomains);
+ 
+   EXPECT_TRUE(ParseHSTSHeader(
+       "animal=\"squirrel; distinguished\"; incLudesUbdOmains; max-age=123",
+-                                   &max_age, &include_subdomains));
++                                   &max_age, &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(123);
+   EXPECT_EQ(expect_max_age, max_age);
+   EXPECT_TRUE(include_subdomains);
+ 
+   EXPECT_TRUE(ParseHSTSHeader("max-age=394082;  incLudesUbdOmains",
+-                              &max_age, &include_subdomains));
++                              &max_age, &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(394082);
+   EXPECT_EQ(expect_max_age, max_age);
+   EXPECT_TRUE(include_subdomains);
+ 
+   EXPECT_TRUE(ParseHSTSHeader(
+       "max-age=39408299  ;incLudesUbdOmains", &max_age,
+-      &include_subdomains));
++      &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(
+       std::min(kMaxHSTSAgeSecs, static_cast<int64>(GG_INT64_C(39408299))));
+   EXPECT_EQ(expect_max_age, max_age);
+@@ -336,7 +338,7 @@ TEST_F(HttpSecurityHeadersTest, ValidSTSHeaders) {
+ 
+   EXPECT_TRUE(ParseHSTSHeader(
+       "max-age=394082038  ; incLudesUbdOmains", &max_age,
+-      &include_subdomains));
++      &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(
+       std::min(kMaxHSTSAgeSecs, static_cast<int64>(GG_INT64_C(394082038))));
+   EXPECT_EQ(expect_max_age, max_age);
+@@ -344,7 +346,7 @@ TEST_F(HttpSecurityHeadersTest, ValidSTSHeaders) {
+ 
+   EXPECT_TRUE(ParseHSTSHeader(
+       "max-age=394082038  ; incLudesUbdOmains;", &max_age,
+-      &include_subdomains));
++      &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(
+       std::min(kMaxHSTSAgeSecs, static_cast<int64>(GG_INT64_C(394082038))));
+   EXPECT_EQ(expect_max_age, max_age);
+@@ -352,7 +354,7 @@ TEST_F(HttpSecurityHeadersTest, ValidSTSHeaders) {
+ 
+   EXPECT_TRUE(ParseHSTSHeader(
+       ";; max-age=394082038  ; incLudesUbdOmains; ;", &max_age,
+-      &include_subdomains));
++      &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(
+       std::min(kMaxHSTSAgeSecs, static_cast<int64>(GG_INT64_C(394082038))));
+   EXPECT_EQ(expect_max_age, max_age);
+@@ -360,7 +362,7 @@ TEST_F(HttpSecurityHeadersTest, ValidSTSHeaders) {
+ 
+   EXPECT_TRUE(ParseHSTSHeader(
+       ";; max-age=394082038  ;", &max_age,
+-      &include_subdomains));
++      &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(
+       std::min(kMaxHSTSAgeSecs, static_cast<int64>(GG_INT64_C(394082038))));
+   EXPECT_EQ(expect_max_age, max_age);
+@@ -368,7 +370,7 @@ TEST_F(HttpSecurityHeadersTest, ValidSTSHeaders) {
+ 
+   EXPECT_TRUE(ParseHSTSHeader(
+       ";;    ; ; max-age=394082038;;; includeSubdomains     ;;  ;", &max_age,
+-      &include_subdomains));
++      &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(
+       std::min(kMaxHSTSAgeSecs, static_cast<int64>(GG_INT64_C(394082038))));
+   EXPECT_EQ(expect_max_age, max_age);
+@@ -376,7 +378,7 @@ TEST_F(HttpSecurityHeadersTest, ValidSTSHeaders) {
+ 
+   EXPECT_TRUE(ParseHSTSHeader(
+       "incLudesUbdOmains   ; max-age=394082038 ;;", &max_age,
+-      &include_subdomains));
++      &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(
+       std::min(kMaxHSTSAgeSecs, static_cast<int64>(GG_INT64_C(394082038))));
+   EXPECT_EQ(expect_max_age, max_age);
+@@ -384,14 +386,14 @@ TEST_F(HttpSecurityHeadersTest, ValidSTSHeaders) {
+ 
+   EXPECT_TRUE(ParseHSTSHeader(
+       "  max-age=0  ;  incLudesUbdOmains   ", &max_age,
+-      &include_subdomains));
++      &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(0);
+   EXPECT_EQ(expect_max_age, max_age);
+   EXPECT_TRUE(include_subdomains);
+ 
+   EXPECT_TRUE(ParseHSTSHeader(
+       "  max-age=999999999999999999999999999999999999999999999  ;"
+-      "  incLudesUbdOmains   ", &max_age, &include_subdomains));
++      "  incLudesUbdOmains   ", &max_age, &include_subdomains, &require_ct));
+   expect_max_age = base::TimeDelta::FromSeconds(
+       kMaxHSTSAgeSecs);
+   EXPECT_EQ(expect_max_age, max_age);
+diff --git a/net/http/transport_security_persister.cc b/net/http/transport_security_persister.cc
+index 82a4b51..8164a36
+--- a/net/http/transport_security_persister.cc
++++ b/net/http/transport_security_persister.cc
+@@ -67,6 +67,7 @@ std::string ExternalStringToHashedDomain(const std::string& external) {
+ }
+ 
+ const char kIncludeSubdomains[] = "include_subdomains";
++const char kRequireCT[] = "require_ct";
+ const char kStsIncludeSubdomains[] = "sts_include_subdomains";
+ const char kPkpIncludeSubdomains[] = "pkp_include_subdomains";
+ const char kMode[] = "mode";
+@@ -147,6 +148,8 @@ bool TransportSecurityPersister::SerializeData(std::string* output) {
+     base::DictionaryValue* serialized = new base::DictionaryValue;
+     serialized->SetBoolean(kStsIncludeSubdomains,
+                            domain_state.sts.include_subdomains);
++	serialized->SetBoolean(kRequireCT,
++                           domain_state.sts.require_ct);
+     serialized->SetBoolean(kPkpIncludeSubdomains,
+                            domain_state.pkp.include_subdomains);
+     serialized->SetDouble(kStsObserved,
+@@ -231,9 +234,17 @@ bool TransportSecurityPersister::Deserialize(const std::string& serialized,
+       parsed_include_subdomains = true;
+     }
+ 
++	bool require_ct;
++	bool parsed_require_ct = false;
++	if (parsed->GetBoolean(kRequireCT, &require_ct)) {
++      domain_state.sts.require_ct = require_ct;
++      parsed_require_ct = true;
++    }
++
+     std::string mode_string;
+     double expiry = 0;
+     if (!parsed_include_subdomains ||
++		!parsed_require_ct ||
+         !parsed->GetString(kMode, &mode_string) ||
+         !parsed->GetDouble(kExpiry, &expiry)) {
+       LOG(WARNING) << "Could not parse some elements of entry " << i.key()
+diff --git a/net/http/transport_security_state.cc b/net/http/transport_security_state.cc
+index a174e98..f8ea963
+--- a/net/http/transport_security_state.cc
++++ b/net/http/transport_security_state.cc
+@@ -108,6 +108,20 @@ bool TransportSecurityState::ShouldSSLErrorsBeFatal(const std::string& host) {
+   return GetDynamicDomainState(host, &state);
+ }
+ 
++bool TransportSecurityState::ShouldRequireCT(const std::string& host) {
++  DomainState dynamic_state;
++  if (GetDynamicDomainState(host, &dynamic_state))
++    return dynamic_state.ShouldRequireCT();
++
++  DomainState static_state;
++  if (GetStaticDomainState(host, &static_state) &&
++      static_state.ShouldRequireCT()) {
++      return true;
++  }
++
++  return false;
++}
++
+ bool TransportSecurityState::ShouldUpgradeToSSL(const std::string& host) {
+   DomainState dynamic_state;
+   if (GetDynamicDomainState(host, &dynamic_state))
+@@ -171,7 +185,8 @@ void TransportSecurityState::AddHSTSInternal(
+     const std::string& host,
+     TransportSecurityState::DomainState::UpgradeMode upgrade_mode,
+     const base::Time& expiry,
+-    bool include_subdomains) {
++    bool include_subdomains,
++    bool require_ct) {
+   DCHECK(CalledOnValidThread());
+ 
+   // Copy-and-modify the existing DomainState for this host (if any).
+@@ -184,6 +199,7 @@ void TransportSecurityState::AddHSTSInternal(
+ 
+   domain_state.sts.last_observed = base::Time::Now();
+   domain_state.sts.include_subdomains = include_subdomains;
++  domain_state.sts.require_ct = require_ct;
+   domain_state.sts.expiry = expiry;
+   domain_state.sts.upgrade_mode = upgrade_mode;
+   EnableHost(host, domain_state);
+@@ -670,7 +686,8 @@ bool TransportSecurityState::AddHSTSHeader(const std::string& host,
+   base::Time now = base::Time::Now();
+   base::TimeDelta max_age;
+   bool include_subdomains;
+-  if (!ParseHSTSHeader(value, &max_age, &include_subdomains)) {
++  bool require_ct;
++  if (!ParseHSTSHeader(value, &max_age, &include_subdomains, &require_ct)) {
+     return false;
+   }
+ 
+@@ -682,7 +699,7 @@ bool TransportSecurityState::AddHSTSHeader(const std::string& host,
+     upgrade_mode = DomainState::MODE_FORCE_HTTPS;
+   }
+ 
+-  AddHSTSInternal(host, upgrade_mode, now + max_age, include_subdomains);
++  AddHSTSInternal(host, upgrade_mode, now + max_age, include_subdomains, require_ct);
+   return true;
+ }
+ 
+@@ -708,10 +725,11 @@ bool TransportSecurityState::AddHPKPHeader(const std::string& host,
+ 
+ void TransportSecurityState::AddHSTS(const std::string& host,
+                                      const base::Time& expiry,
+-                                     bool include_subdomains) {
++                                     bool include_subdomains,
++                                     bool require_ct) {
+   DCHECK(CalledOnValidThread());
+   AddHSTSInternal(host, DomainState::MODE_FORCE_HTTPS, expiry,
+-                  include_subdomains);
++                  include_subdomains, require_ct);
+ }
+ 
+ void TransportSecurityState::AddHPKP(const std::string& host,
+@@ -782,6 +800,7 @@ bool TransportSecurityState::GetStaticDomainState(const std::string& host,
+ 
+   out->sts.upgrade_mode = DomainState::MODE_FORCE_HTTPS;
+   out->sts.include_subdomains = false;
++  out->sts.require_ct = false;
+   out->pkp.include_subdomains = false;
+ 
+   if (!IsBuildTimely())
+@@ -895,6 +914,7 @@ void TransportSecurityState::AddOrUpdateEnabledHosts(
+ TransportSecurityState::DomainState::DomainState() {
+   sts.upgrade_mode = MODE_DEFAULT;
+   sts.include_subdomains = false;
++  sts.require_ct = false;
+   pkp.include_subdomains = false;
+ }
+ 
+@@ -939,6 +959,10 @@ bool TransportSecurityState::DomainState::ShouldUpgradeToSSL() const {
+   return sts.upgrade_mode == MODE_FORCE_HTTPS;
+ }
+ 
++bool TransportSecurityState::DomainState::ShouldRequireCT() const {
++  return sts.require_ct;
++}
++
+ bool TransportSecurityState::DomainState::ShouldSSLErrorsBeFatal() const {
+   // Both HSTS and HPKP cause fatal SSL errors, so enable this on the presense
+   // of either. (If neither is active, no DomainState will be returned.)
+diff --git a/net/http/transport_security_state.h b/net/http/transport_security_state.h
+index 6a4615c..ea4fed6
+--- a/net/http/transport_security_state.h
++++ b/net/http/transport_security_state.h
+@@ -81,6 +81,9 @@ class NET_EXPORT TransportSecurityState
+ 
+       // Are subdomains subject to this policy state?
+       bool include_subdomains;
++      
++      // Does this host require Certificate Transparency
++      bool require_ct;
+ 
+       // The domain which matched during a search for this DomainState entry.
+       // Updated by |GetDynamicDomainState| and |GetStaticDomainState|.
+@@ -142,6 +145,10 @@ class NET_EXPORT TransportSecurityState
+     // redirected to HTTPS (also if WS should be upgraded to WSS).
+     bool ShouldUpgradeToSSL() const;
+ 
++    // ShouldUpgradeToSSL returns true iff we should fail a connection if it
++    // omits Cert Transparency records
++    bool ShouldRequireCT() const;
++
+     // ShouldSSLErrorsBeFatal returns true iff HTTPS errors should cause
+     // hard-fail behavior (e.g. if HSTS is set for the domain).
+     bool ShouldSSLErrorsBeFatal() const;
+@@ -170,6 +177,7 @@ class NET_EXPORT TransportSecurityState
+   // interface; direct access to DomainStates is best left to tests.
+   bool ShouldSSLErrorsBeFatal(const std::string& host);
+   bool ShouldUpgradeToSSL(const std::string& host);
++  bool ShouldRequireCT(const std::string& host);
+   bool CheckPublicKeyPins(const std::string& host,
+                           bool is_issued_by_known_root,
+                           const HashValueVector& hashes,
+@@ -247,7 +255,8 @@ class NET_EXPORT TransportSecurityState
+   // HSTS header (used for net-internals and unit tests).
+   void AddHSTS(const std::string& host,
+                const base::Time& expiry,
+-               bool include_subdomains);
++               bool include_subdomains,
++               bool require_ct);
+ 
+   // Adds explicitly-specified data as if it was processed from an
+   // HPKP header (used for net-internals and unit tests).
+@@ -303,7 +312,8 @@ class NET_EXPORT TransportSecurityState
+   void AddHSTSInternal(const std::string& host,
+                        DomainState::UpgradeMode upgrade_mode,
+                        const base::Time& expiry,
+-                       bool include_subdomains);
++                       bool include_subdomains,
++                       bool require_ct);
+ 
+   // Adds HPKP state to |host|.
+   void AddHPKPInternal(const std::string& host,
+diff --git a/net/socket/ssl_client_socket_nss.cc b/net/socket/ssl_client_socket_nss.cc
+index 483c5e7..cde0efa 100644
+--- a/net/socket/ssl_client_socket_nss.cc
++++ b/net/socket/ssl_client_socket_nss.cc
+@@ -3550,8 +3550,11 @@ int SSLClientSocketNSS::DoVerifyCertComplete(int result) {
+   if (result == OK) {
+     // Only check Certificate Transparency if there were no other errors with
+     // the connection.
+-    VerifyCT();
++    bool require_ct = transport_security_state_ && transport_security_state_->ShouldRequireCT(host_and_port_.host());
++    result = VerifyCT(require_ct);
++  }
+ 
++  if (result == OK) {
+     // Only cache the session if the certificate verified successfully.
+     core_->CacheSessionIfNecessary();
+   }
+@@ -3563,9 +3566,11 @@ int SSLClientSocketNSS::DoVerifyCertComplete(int result) {
+   return result;
+ }
+ 
+-void SSLClientSocketNSS::VerifyCT() {
+-  if (!cert_transparency_verifier_)
+-    return;
++int SSLClientSocketNSS::VerifyCT(bool require_ct) {
++  if (!cert_transparency_verifier_ && !require_ct)
++    return OK;
++  else if (!cert_transparency_verifier_ && require_ct)
++    return ERR_SSL_CERTIFICATE_NOT_VALIDATED_THROUGH_CT;
+ 
+   // Note that this is a completely synchronous operation: The CT Log Verifier
+   // gets all the data it needs for SCT verification and does not do any
+@@ -3579,6 +3584,7 @@ void SSLClientSocketNSS::VerifyCT() {
+ 
+   if (!policy_enforcer_) {
+     server_cert_verify_result_.cert_status &= ~CERT_STATUS_IS_EV;
++    if(require_ct) return ERR_SSL_CERTIFICATE_NOT_VALIDATED_THROUGH_CT;
+   } else {
+     if (server_cert_verify_result_.cert_status & CERT_STATUS_IS_EV) {
+       scoped_refptr<ct::EVCertsWhitelist> ev_whitelist =
+@@ -3594,7 +3600,19 @@ void SSLClientSocketNSS::VerifyCT() {
+         server_cert_verify_result_.cert_status &= ~CERT_STATUS_IS_EV;
+       }
+     }
++    if (require_ct) {
++      if (!policy_enforcer_->DoesConformToCTRequiredPolicy(
++              server_cert_verify_result_.verified_cert.get(),
++              ct_verify_result_, net_log_)) {
++        VLOG(1) << "certificate for "
++                << server_cert_verify_result_.verified_cert->subject()
++                       .GetDisplayName()
++                << " does not conform to CT Required policy, aborting.";
++        return ERR_SSL_CERTIFICATE_NOT_VALIDATED_THROUGH_CT;
++      }
++    }
+   }
++  return OK;
+ }
+ 
+ void SSLClientSocketNSS::EnsureThreadIdAssigned() const {
+diff --git a/net/socket/ssl_client_socket_nss.h b/net/socket/ssl_client_socket_nss.h
+index 10bb57f..bafd76d 100644
+--- a/net/socket/ssl_client_socket_nss.h
++++ b/net/socket/ssl_client_socket_nss.h
+@@ -143,7 +143,7 @@ class SSLClientSocketNSS : public SSLClientSocket {
+   int DoVerifyCert(int result);
+   int DoVerifyCertComplete(int result);
+ 
+-  void VerifyCT();
++  int VerifyCT(bool);
+ 
+   // The following methods are for debugging bug 65948. Will remove this code
+   // after fixing bug 65948.
+diff --git a/net/socket/ssl_client_socket_openssl.cc b/net/socket/ssl_client_socket_openssl.cc
+index c4af957..4c8bce1 100644
+--- a/net/socket/ssl_client_socket_openssl.cc
++++ b/net/socket/ssl_client_socket_openssl.cc
+@@ -1233,8 +1233,11 @@ int SSLClientSocketOpenSSL::DoVerifyCertComplete(int result) {
+   if (result == OK) {
+     // Only check Certificate Transparency if there were no other errors with
+     // the connection.
+-    VerifyCT();
+-
++    bool require_ct = transport_security_state_ && transport_security_state_->ShouldRequireCT(host_and_port_.host());
++    result = VerifyCT(require_ct);
++  }
++  
++  if (result == OK) {
+     // TODO(joth): Work out if we need to remember the intermediate CA certs
+     // when the server sends them to us, and do so here.
+     SSLContext::GetInstance()->session_cache()->MarkSSLSessionAsGood(ssl_);
+@@ -1315,9 +1318,11 @@ void SSLClientSocketOpenSSL::UpdateServerCert() {
+   }
+ }
+ 
+-void SSLClientSocketOpenSSL::VerifyCT() {
+-  if (!cert_transparency_verifier_)
+-    return;
++int SSLClientSocketOpenSSL::VerifyCT(bool require_ct) {
++  if (!cert_transparency_verifier_ && !require_ct)
++    return OK;
++  else if (!cert_transparency_verifier_ && require_ct)
++    return ERR_SSL_CERTIFICATE_NOT_VALIDATED_THROUGH_CT;
+ 
+   const uint8_t* ocsp_response_raw;
+   size_t ocsp_response_len;
+@@ -1344,6 +1349,7 @@ void SSLClientSocketOpenSSL::VerifyCT() {
+ 
+   if (!policy_enforcer_) {
+     server_cert_verify_result_.cert_status &= ~CERT_STATUS_IS_EV;
++    if(require_ct) return ERR_SSL_CERTIFICATE_NOT_VALIDATED_THROUGH_CT;
+   } else {
+     if (server_cert_verify_result_.cert_status & CERT_STATUS_IS_EV) {
+       scoped_refptr<ct::EVCertsWhitelist> ev_whitelist =
+@@ -1359,7 +1365,19 @@ void SSLClientSocketOpenSSL::VerifyCT() {
+         server_cert_verify_result_.cert_status &= ~CERT_STATUS_IS_EV;
+       }
+     }
++    if (require_ct) {
++      if (!policy_enforcer_->DoesConformToCTRequiredPolicy(
++              server_cert_verify_result_.verified_cert.get(),
++              ct_verify_result_, net_log_)) {
++        VLOG(1) << "certificate for "
++                << server_cert_verify_result_.verified_cert->subject()
++                       .GetDisplayName()
++                << " does not conform to CT Required policy, aborting.";
++        return ERR_SSL_CERTIFICATE_NOT_VALIDATED_THROUGH_CT;
++      }
++    }
+   }
++  return OK;
+ }
+ 
+ void SSLClientSocketOpenSSL::OnHandshakeIOComplete(int result) {
+diff --git a/net/socket/ssl_client_socket_openssl.h b/net/socket/ssl_client_socket_openssl.h
+index 6aaf1e1..9198c73 100644
+--- a/net/socket/ssl_client_socket_openssl.h
++++ b/net/socket/ssl_client_socket_openssl.h
+@@ -124,7 +124,7 @@ class SSLClientSocketOpenSSL : public SSLClientSocket {
+   int DoVerifyCertComplete(int result);
+   void DoConnectCallback(int result);
+   void UpdateServerCert();
+-  void VerifyCT();
++  int VerifyCT(bool);
+ 
+   void OnHandshakeIOComplete(int result);
+   void OnSendComplete(int result);
+diff --git a/net/spdy/spdy_session.cc b/net/spdy/spdy_session.cc
+index a6478df..47b406e 100644
+--- a/net/spdy/spdy_session.cc
++++ b/net/spdy/spdy_session.cc
+@@ -588,6 +588,8 @@ bool SpdySession::CanPool(TransportSecurityState* transport_security_state,
+   if (!ssl_info.cert->VerifyNameMatch(new_hostname, &unused))
+     return false;
+ 
++  //May need to put a CT check here
++
+   std::string pinning_failure_log;
+   if (!transport_security_state->CheckPublicKeyPins(
+           new_hostname,
+diff --git a/net/url_request/url_request_http_job.cc b/net/url_request/url_request_http_job.cc
+index 68858c1..f572e2b 100644
+--- a/net/url_request/url_request_http_job.cc
++++ b/net/url_request/url_request_http_job.cc
+@@ -915,13 +915,18 @@ void URLRequestHttpJob::OnStartCompleted(int result) {
+ 
+     SaveCookiesAndNotifyHeadersComplete(net::OK);
+   } else if (IsCertificateError(result)) {
+-    // We encountered an SSL certificate error.
++    // In either case, we need to update the certificate status so it 
++	// reflects an error. What's not clear to me (tom) is if a non-fatal
++	// error should _not_ have the certificate status updated. But right 
++	// now, all errors are fatal. So it shouldn't matter?
++	SSLInfo info(transaction_->GetResponseInfo()->ssl_info);
++    info.cert_status = MapNetErrorToCertStatus(result);
++
++	// We encountered an SSL certificate error.
+     if (result == ERR_SSL_WEAK_SERVER_EPHEMERAL_DH_KEY ||
+         result == ERR_SSL_PINNED_KEY_NOT_IN_CERT_CHAIN) {
+       // These are hard failures. They're handled separately and don't have
+       // the correct cert status, so set it here.
+-      SSLInfo info(transaction_->GetResponseInfo()->ssl_info);
+-      info.cert_status = MapNetErrorToCertStatus(result);
+       NotifySSLCertificateError(info, true);
+     } else {
+       // Maybe overridable, maybe not. Ask the delegate to decide.
+@@ -929,8 +934,7 @@ void URLRequestHttpJob::OnStartCompleted(int result) {
+       TransportSecurityState* state = context->transport_security_state();
+       const bool fatal =
+           state && state->ShouldSSLErrorsBeFatal(request_info_.url.host());
+-      NotifySSLCertificateError(
+-          transaction_->GetResponseInfo()->ssl_info, fatal);
++      NotifySSLCertificateError(info, fatal);
+     }
+   } else if (result == ERR_SSL_CLIENT_AUTH_CERT_NEEDED) {
+     NotifyCertificateRequested(
+diff --git a/net/url_request/url_request_unittest.cc b/net/url_request/url_request_unittest.cc
+index c3bc166..294cea2 100644
+--- a/net/url_request/url_request_unittest.cc
++++ b/net/url_request/url_request_unittest.cc
+@@ -7165,8 +7165,9 @@ TEST_F(HTTPSRequestTest, HSTSPreservesPosts) {
+   TransportSecurityState transport_security_state;
+   base::Time expiry = base::Time::Now() + base::TimeDelta::FromDays(1000);
+   bool include_subdomains = false;
++  bool require_ct = false;
+   transport_security_state.AddHSTS("www.somewhere.com", expiry,
+-                                   include_subdomains);
++                                   include_subdomains, require_ct);
+ 
+   TestNetworkDelegate network_delegate;  // Must outlive URLRequest.
+ 
+@@ -7221,7 +7222,8 @@ TEST_F(HTTPSRequestTest, HSTSCrossOriginAddHeaders) {
+   TransportSecurityState transport_security_state;
+   base::Time expiry = base::Time::Now() + base::TimeDelta::FromDays(1);
+   bool include_subdomains = false;
+-  transport_security_state.AddHSTS("example.net", expiry, include_subdomains);
++  bool require_ct = false;
++  transport_security_state.AddHSTS("example.net", expiry, include_subdomains, require_ct);
+ 
+   TestNetworkDelegate network_delegate;  // Must outlive URLRequest.
+ 
+-- 
+2.1.4
+
