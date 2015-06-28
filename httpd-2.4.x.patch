@@ -1,0 +1,446 @@
+Index: CMakeLists.txt
+===================================================================
+--- CMakeLists.txt	(revision 1661567)
++++ CMakeLists.txt	(working copy)
+@@ -404,6 +404,7 @@
+ SET(mod_session_crypto_extra_libs    mod_session)
+ SET(mod_session_dbd_extra_libs       mod_session)
+ SET(mod_socache_dc_requires          AN_UNIMPLEMENTED_SUPPORT_LIBRARY_REQUIREMENT)
++SET(mod_ssl_extra_defines            SSL_DECLARE_EXPORT)
+ SET(mod_ssl_requires                 OPENSSL_FOUND)
+ IF(OPENSSL_FOUND)
+   SET(mod_ssl_extra_includes           ${OPENSSL_INCLUDE_DIR})
+@@ -598,6 +599,7 @@
+   ${CMAKE_CURRENT_SOURCE_DIR}/modules/proxy/mod_proxy.h
+   ${CMAKE_CURRENT_SOURCE_DIR}/modules/session/mod_session.h
+   ${CMAKE_CURRENT_SOURCE_DIR}/modules/ssl/mod_ssl.h
++  ${CMAKE_CURRENT_SOURCE_DIR}/modules/ssl/mod_ssl_openssl.h
+ )
+ # When mod_serf is buildable, don't forget to copy modules/proxy/mod_serf.h
+ 
+Index: Makefile.in
+===================================================================
+--- Makefile.in	(revision 1661567)
++++ Makefile.in	(working copy)
+@@ -214,6 +214,7 @@
+ 	$(srcdir)/modules/proxy/mod_proxy.h \
+         $(srcdir)/modules/session/mod_session.h \
+ 	$(srcdir)/modules/ssl/mod_ssl.h \
++	$(srcdir)/modules/ssl/mod_ssl_openssl.h \
+ 	$(srcdir)/os/$(OS_DIR)/*.h
+ 
+ install-include:
+Index: Makefile.win
+===================================================================
+--- Makefile.win	(revision 1661567)
++++ Makefile.win	(working copy)
+@@ -1055,6 +1055,7 @@
+ 		modules\mappers\mod_rewrite.h \
+ 		modules\proxy\mod_proxy.h \
+ 		modules\ssl\mod_ssl.h \
++		modules\ssl\mod_ssl_openssl.h \
+           ) do \
+ 	    @copy %f "$(INSTDIR)\include" < .y > nul
+ 	copy srclib\apr\Lib$(SHORT)\apr-1.lib		"$(INSTDIR)\lib" <.y
+Index: NWGNUmakefile
+===================================================================
+--- NWGNUmakefile	(revision 1661567)
++++ NWGNUmakefile	(working copy)
+@@ -446,6 +446,7 @@
+ 	$(call COPY,$(STDMOD)/proxy/mod_proxy.h,                       $(INSTALLBASE)/include/)
+ 	$(call COPY,$(STDMOD)/session/mod_session.h,                   $(INSTALLBASE)/include/)
+ 	$(call COPY,$(STDMOD)/ssl/mod_ssl.h,                           $(INSTALLBASE)/include/)
++	$(call COPY,$(STDMOD)/ssl/mod_ssl_openssl.h,                   $(INSTALLBASE)/include/)
+ 	$(call COPY,$(APR)/*.imp,                                      $(INSTALLBASE)/lib/)
+ 	$(call COPY,$(NWOS)/*.imp,                                     $(INSTALLBASE)/lib/)
+ 	$(call COPY,$(NWOS)/*.xdc,                                     $(INSTALLBASE)/lib/)
+Index: modules/proxy/mod_proxy.c
+===================================================================
+--- modules/proxy/mod_proxy.c	(revision 1661567)
++++ modules/proxy/mod_proxy.c	(working copy)
+@@ -2787,3 +2787,7 @@
+                                     (int *status, request_rec *r),
+                                     (status, r),
+                                     OK, DECLINED)
++APR_IMPLEMENT_OPTIONAL_HOOK_RUN_ALL(proxy, PROXY, int, detach_backend,
++                                    (request_rec *r, proxy_conn_rec *backend),
++                                    (r, backend), OK, DECLINED)
++
+Index: modules/proxy/mod_proxy.h
+===================================================================
+--- modules/proxy/mod_proxy.h	(revision 1661567)
++++ modules/proxy/mod_proxy.h	(working copy)
+@@ -513,6 +513,15 @@
+ APR_DECLARE_EXTERNAL_HOOK(proxy, PROXY, int, fixups, (request_rec *r))
+ 
+ /**
++ * Let modules perform processing when the connection to the origin is being
++ * detached from the request.
++ * @param r The client request
++ * @param backend The proxy representation of the backend connection
++ */
++APR_DECLARE_EXTERNAL_HOOK(proxy, PROXY, int, detach_backend, (request_rec *r,
++                                                              proxy_conn_rec *backend))
++
++/**
+  * pre request hook.
+  * It will return the most suitable worker at the moment
+  * and coresponding balancer.
+Index: modules/proxy/mod_proxy_http.c
+===================================================================
+--- modules/proxy/mod_proxy_http.c	(revision 1661567)
++++ modules/proxy/mod_proxy_http.c	(working copy)
+@@ -1313,6 +1313,7 @@
+                 apr_table_setn(r->notes, "proxy_timedout", "1");
+                 ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, APLOGNO(01103) "read timeout");
+                 if (do_100_continue) {
++                    proxy_run_detach_backend(r, backend);
+                     return ap_proxyerror(r, HTTP_SERVICE_UNAVAILABLE, "Timeout on 100-Continue");
+                 }
+             }
+@@ -1363,6 +1364,7 @@
+                 /* Mark the backend connection for closing */
+                 backend->close = 1;
+                 /* Need to return OK to avoid sending an error message */
++                proxy_run_detach_backend(r, backend);
+                 return OK;
+             }
+             else if (!c->keepalives) {
+@@ -1372,6 +1374,7 @@
+                                    " failed.",
+                                    backend->hostname, backend->port);
+             }
++            proxy_run_detach_backend(r, backend);
+             return ap_proxyerror(r, HTTP_BAD_GATEWAY,
+                                  "Error reading from remote server");
+         }
+@@ -1391,6 +1394,7 @@
+              * if the status line was > 8192 bytes
+              */
+             if ((major != 1) || (len >= sizeof(buffer)-1)) {
++                proxy_run_detach_backend(r, backend);
+                 return ap_proxyerror(r, HTTP_BAD_GATEWAY,
+                 apr_pstrcat(p, "Corrupt status line returned by remote "
+                             "server: ", buffer, NULL));
+@@ -1449,6 +1453,7 @@
+                 r->headers_out = apr_table_make(r->pool,1);
+                 r->status = HTTP_BAD_GATEWAY;
+                 r->status_line = "bad gateway";
++                proxy_run_detach_backend(r, backend);
+                 return r->status;
+             }
+ 
+@@ -1658,6 +1663,7 @@
+                 }
+                 ap_discard_request_body(backend->r);
+             }
++            proxy_run_detach_backend(r, backend);
+             return proxy_status;
+         }
+ 
+@@ -1801,6 +1807,7 @@
+                          * left waiting for a slow client to eventually
+                          * acknowledge the data.
+                          */
++                        proxy_run_detach_backend(r, backend);
+                         ap_proxy_release_connection(backend->worker->s->scheme,
+                                 backend, r->server);
+                         /* Ensure that the backend is not reused */
+@@ -1839,6 +1846,7 @@
+              * left waiting for a slow client to eventually
+              * acknowledge the data.
+              */
++            proxy_run_detach_backend(r, backend);
+             ap_proxy_release_connection(backend->worker->s->scheme,
+                     backend, r->server);
+             *backend_ptr = NULL;
+@@ -1856,6 +1864,10 @@
+      * created from scpool and this pool can be freed before this brigade. */
+     apr_brigade_cleanup(bb);
+ 
++    if (*backend_ptr) {
++        proxy_run_detach_backend(r, backend);
++    }
++
+     /* See define of AP_MAX_INTERIM_RESPONSES for why */
+     if (interim_response >= AP_MAX_INTERIM_RESPONSES) {
+         return ap_proxyerror(r, HTTP_BAD_GATEWAY,
+@@ -2011,6 +2023,7 @@
+          */
+         if ((status = ap_proxy_http_request(p, r, backend, worker,
+                                         conf, uri, locurl, server_portstr)) != OK) {
++            proxy_run_detach_backend(r, backend);
+             if ((status == HTTP_SERVICE_UNAVAILABLE) && worker->s->ping_timeout_set) {
+                 backend->close = 1;
+                 ap_log_rerror(APLOG_MARK, APLOG_INFO, status, r, APLOGNO(01115)
+Index: modules/ssl/mod_ssl.c
+===================================================================
+--- modules/ssl/mod_ssl.c	(revision 1661567)
++++ modules/ssl/mod_ssl.c	(working copy)
+@@ -26,6 +26,7 @@
+ 
+ #include "ssl_private.h"
+ #include "mod_ssl.h"
++#include "mod_ssl_openssl.h"
+ #include "util_md5.h"
+ #include "util_mutex.h"
+ #include "ap_provider.h"
+@@ -32,6 +33,10 @@
+ 
+ #include <assert.h>
+ 
++APR_IMPLEMENT_OPTIONAL_HOOK_RUN_ALL(ssl, SSL, int, pre_handshake,
++                                    (conn_rec *c,SSL *ssl,int is_proxy),
++                                    (c,ssl,is_proxy), OK, DECLINED);
++
+ /*
+  *  the table of configuration directives we provide
+  */
+@@ -429,6 +434,7 @@
+     SSL *ssl;
+     SSLConnRec *sslconn = myConnConfig(c);
+     char *vhost_md5;
++    int rc;
+     modssl_ctx_t *mctx;
+     server_rec *server;
+ 
+@@ -461,6 +467,11 @@
+         return DECLINED; /* XXX */
+     }
+ 
++    rc = ssl_run_pre_handshake(c, ssl, sslconn->is_proxy ? 1 : 0);
++    if (rc != OK && rc != DECLINED) {
++        return rc;
++    }
++
+     vhost_md5 = ap_md5_binary(c->pool, (unsigned char *)sc->vhost_id,
+                               sc->vhost_id_len);
+ 
+Index: modules/ssl/mod_ssl.dsp
+===================================================================
+--- modules/ssl/mod_ssl.dsp	(revision 1661567)
++++ modules/ssl/mod_ssl.dsp	(working copy)
+@@ -43,7 +43,7 @@
+ # PROP Ignore_Export_Lib 0
+ # PROP Target_Dir ""
+ # ADD BASE CPP /nologo /MD /W3 /O2 /D "WIN32" /D "NDEBUG" /D "_WINDOWS" /FD /c
+-# ADD CPP /nologo /MD /W3 /O2 /Oy- /Zi /I "../../include" /I "../generators" /I "../../srclib/apr/include" /I "../../srclib/apr-util/include" /I "../../srclib/openssl/inc32" /D "NDEBUG" /D "WIN32" /D "_WINDOWS" /D "WIN32_LEAN_AND_MEAN" /D "NO_IDEA" /D "NO_RC5" /D "NO_MDC2" /D "OPENSSL_NO_IDEA" /D "OPENSSL_NO_RC5" /D "OPENSSL_NO_MDC2" /D "HAVE_OPENSSL" /D "HAVE_SSL_SET_STATE" /D "HAVE_OPENSSL_ENGINE_H" /D "HAVE_ENGINE_INIT" /D "HAVE_ENGINE_LOAD_BUILTIN_ENGINES" /Fd"Release\mod_ssl_src" /FD /c
++# ADD CPP /nologo /MD /W3 /O2 /Oy- /Zi /I "../../include" /I "../generators" /I "../../srclib/apr/include" /I "../../srclib/apr-util/include" /I "../../srclib/openssl/inc32" /D "NDEBUG" /D "WIN32" /D "_WINDOWS" /D "WIN32_LEAN_AND_MEAN" /D "NO_IDEA" /D "NO_RC5" /D "NO_MDC2" /D "OPENSSL_NO_IDEA" /D "OPENSSL_NO_RC5" /D "OPENSSL_NO_MDC2" /D "HAVE_OPENSSL" /D "HAVE_SSL_SET_STATE" /D "HAVE_OPENSSL_ENGINE_H" /D "HAVE_ENGINE_INIT" /D "HAVE_ENGINE_LOAD_BUILTIN_ENGINES" /D "SSL_DECLARE_EXPORT" /Fd"Release\mod_ssl_src" /FD /c
+ # ADD BASE MTL /nologo /D "NDEBUG" /win32
+ # ADD MTL /nologo /D "NDEBUG" /mktyplib203 /win32
+ # ADD BASE RSC /l 0x409 /d "NDEBUG"
+@@ -75,7 +75,7 @@
+ # PROP Ignore_Export_Lib 0
+ # PROP Target_Dir ""
+ # ADD BASE CPP /nologo /MDd /W3 /EHsc /Zi /Od /D "WIN32" /D "_DEBUG" /D "_WINDOWS" /FD /c
+-# ADD CPP /nologo /MDd /W3 /EHsc /Zi /Od /I "../../include" /I "../generators" /I "../../srclib/apr/include" /I "../../srclib/apr-util/include" /I "../../srclib/openssl/inc32" /D "_DEBUG" /D "WIN32" /D "_WINDOWS" /D "WIN32_LEAN_AND_MEAN" /D "NO_IDEA" /D "NO_RC5" /D "NO_MDC2" /D "OPENSSL_NO_IDEA" /D "OPENSSL_NO_RC5" /D "OPENSSL_NO_MDC2" /D "HAVE_OPENSSL" /D "HAVE_SSL_SET_STATE" /D "HAVE_OPENSSL_ENGINE_H" /D "HAVE_ENGINE_INIT" /D "HAVE_ENGINE_LOAD_BUILTIN_ENGINES" /Fd"Debug\mod_ssl_src" /FD /c
++# ADD CPP /nologo /MDd /W3 /EHsc /Zi /Od /I "../../include" /I "../generators" /I "../../srclib/apr/include" /I "../../srclib/apr-util/include" /I "../../srclib/openssl/inc32" /D "_DEBUG" /D "WIN32" /D "_WINDOWS" /D "WIN32_LEAN_AND_MEAN" /D "NO_IDEA" /D "NO_RC5" /D "NO_MDC2" /D "OPENSSL_NO_IDEA" /D "OPENSSL_NO_RC5" /D "OPENSSL_NO_MDC2" /D "HAVE_OPENSSL" /D "HAVE_SSL_SET_STATE" /D "HAVE_OPENSSL_ENGINE_H" /D "HAVE_ENGINE_INIT" /D "HAVE_ENGINE_LOAD_BUILTIN_ENGINES" /D "SSL_DECLARE_EXPORT" /Fd"Debug\mod_ssl_src" /FD /c
+ # ADD BASE MTL /nologo /D "_DEBUG" /win32
+ # ADD MTL /nologo /D "_DEBUG" /mktyplib203 /win32
+ # ADD BASE RSC /l 0x409 /d "_DEBUG"
+Index: modules/ssl/mod_ssl.h
+===================================================================
+--- modules/ssl/mod_ssl.h	(revision 1661567)
++++ modules/ssl/mod_ssl.h	(working copy)
+@@ -29,6 +29,27 @@
+ #include "httpd.h"
+ #include "apr_optional.h"
+ 
++/* Create a set of SSL_DECLARE(type), SSL_DECLARE_NONSTD(type) and
++ * SSL_DECLARE_DATA with appropriate export and import tags for the platform
++ */
++#if !defined(WIN32)
++#define SSL_DECLARE(type)            type
++#define SSL_DECLARE_NONSTD(type)     type
++#define SSL_DECLARE_DATA
++#elif defined(SSL_DECLARE_STATIC)
++#define SSL_DECLARE(type)            type __stdcall
++#define SSL_DECLARE_NONSTD(type)     type
++#define SSL_DECLARE_DATA
++#elif defined(SSL_DECLARE_EXPORT)
++#define SSL_DECLARE(type)            __declspec(dllexport) type __stdcall
++#define SSL_DECLARE_NONSTD(type)     __declspec(dllexport) type
++#define SSL_DECLARE_DATA             __declspec(dllexport)
++#else
++#define SSL_DECLARE(type)            __declspec(dllimport) type __stdcall
++#define SSL_DECLARE_NONSTD(type)     __declspec(dllimport) type
++#define SSL_DECLARE_DATA             __declspec(dllimport)
++#endif
++
+ /** The ssl_var_lookup() optional function retrieves SSL environment
+  * variables. */
+ APR_DECLARE_OPTIONAL_FN(char *, ssl_var_lookup,
+Index: modules/ssl/mod_ssl_openssl.h
+===================================================================
+--- modules/ssl/mod_ssl_openssl.h	(revision 0)
++++ modules/ssl/mod_ssl_openssl.h	(working copy)
+@@ -0,0 +1,73 @@
++/* Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/**
++ * @file mod_ssl_openssl.h
++ * @brief Interface to OpenSSL-specific APIs provided by mod_ssl
++ *
++ * @defgroup MOD_SSL mod_ssl_openssl
++ * @ingroup  APACHE_MODS
++ * @{
++ */
++
++#ifndef __MOD_SSL_OPENSSL_H__
++#define __MOD_SSL_OPENSSL_H__
++
++#include "mod_ssl.h"
++
++/* OpenSSL headers */
++
++#ifndef SSL_PRIVATE_H
++#include <openssl/opensslv.h>
++#if (OPENSSL_VERSION_NUMBER >= 0x10001000)
++/* must be defined before including ssl.h */
++#define OPENSSL_NO_SSL_INTERN
++#endif
++#include <openssl/ssl.h>
++#endif
++
++/**
++ * init_server hook -- allow SSL_CTX-specific initialization to be performed by
++ * a module for each SSL-enabled server (one at a time)
++ * @param s SSL-enabled [virtual] server
++ * @param p pconf pool
++ * @param is_proxy 1 if this server supports backend connections
++ * over SSL/TLS, 0 if it supports client connections over SSL/TLS
++ * @param ctx OpenSSL SSL Context for the server
++ */
++APR_DECLARE_EXTERNAL_HOOK(ssl, SSL, int, init_server,
++                          (server_rec *s, apr_pool_t *p, int is_proxy, SSL_CTX *ctx))
++
++/**
++ * pre_handshake hook
++ * @param c conn_rec for new connection from client or to backend server
++ * @param ssl OpenSSL SSL Connection for the client or backend server
++ * @param is_proxy 1 if this handshake is for a backend connection, 0 otherwise
++ */
++APR_DECLARE_EXTERNAL_HOOK(ssl, SSL, int, pre_handshake,
++                          (conn_rec *c, SSL *ssl, int is_proxy))
++
++/**
++ * proxy_post_handshake hook -- allow module to abort after successful
++ * handshake with backend server and subsequent peer checks
++ * @param c conn_rec for connection to backend server
++ * @param ssl OpenSSL SSL Connection for the client or backend server
++ */
++APR_DECLARE_EXTERNAL_HOOK(ssl, SSL, int, proxy_post_handshake,
++                          (conn_rec *c, SSL *ssl))
++
++#endif /* __MOD_SSL_OPENSSL_H__ */
++/** @} */
+Index: modules/ssl/ssl_engine_init.c
+===================================================================
+--- modules/ssl/ssl_engine_init.c	(revision 1661567)
++++ modules/ssl/ssl_engine_init.c	(working copy)
+@@ -27,8 +27,14 @@
+                                   see Recursive.''
+                                         -- Unknown   */
+ #include "ssl_private.h"
++#include "mod_ssl.h"
++#include "mod_ssl_openssl.h"
+ #include "mpm_common.h"
+ 
++APR_IMPLEMENT_OPTIONAL_HOOK_RUN_ALL(ssl, SSL, int, init_server,
++                                    (server_rec *s,apr_pool_t *p,int is_proxy,SSL_CTX *ctx),
++                                    (s,p,is_proxy,ctx), OK, DECLINED)
++
+ /*  _________________________________________________________________
+ **
+ **  Module Initialization
+@@ -321,6 +327,25 @@
+         return rv;
+     }
+ 
++    for (s = base_server; s; s = s->next) {
++        sc = mySrvConfig(s);
++
++        if (sc->enabled == SSL_ENABLED_TRUE || sc->enabled == SSL_ENABLED_OPTIONAL) {
++            if ((rv = ssl_run_init_server(s, p, 0, sc->server->ssl_ctx)) != APR_SUCCESS) {
++                ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, APLOGNO()
++                             "Init: server init_server failed");
++                return rv;
++            }
++        }
++        else if (sc->proxy_enabled == SSL_ENABLED_TRUE) {
++            if ((rv = ssl_run_init_server(s, p, 1, sc->proxy->ssl_ctx)) != APR_SUCCESS) {
++                ap_log_error(APLOG_MARK, APLOG_ERR, 0, s, APLOGNO()
++                             "Init: proxy init_server failed");
++                return rv;
++            }
++        }
++    }
++
+     /*
+      *  Announce mod_ssl and SSL library in HTTP Server field
+      *  as ``mod_ssl/X.X.X OpenSSL/X.X.X''
+Index: modules/ssl/ssl_engine_io.c
+===================================================================
+--- modules/ssl/ssl_engine_io.c	(revision 1661567)
++++ modules/ssl/ssl_engine_io.c	(working copy)
+@@ -28,8 +28,13 @@
+                                   core keeps dumping.''
+                                             -- Unknown    */
+ #include "ssl_private.h"
++#include "mod_ssl_openssl.h"
+ #include "apr_date.h"
+ 
++APR_IMPLEMENT_OPTIONAL_HOOK_RUN_ALL(ssl, SSL, int, proxy_post_handshake,
++                                    (conn_rec *c,SSL *ssl),
++                                    (c,ssl),OK,DECLINED);
++
+ /*  _________________________________________________________________
+ **
+ **  I/O Hooks
+@@ -1066,6 +1071,8 @@
+         const char *hostname_note = apr_table_get(c->notes,
+                                                   "proxy-request-hostname");
+         BOOL proxy_ssl_check_peer_ok = TRUE;
++        int post_handshake_rc = OK;
++
+         sc = mySrvConfig(server);
+ 
+ #ifdef HAVE_TLSEXT
+@@ -1155,15 +1162,21 @@
+             }
+         }
+ 
++        if (proxy_ssl_check_peer_ok == TRUE) {
++            /* another chance to fail */
++            post_handshake_rc = ssl_run_proxy_post_handshake(c, filter_ctx->pssl);
++        }
++
+         if (cert) {
+             X509_free(cert);
+         }
+ 
+-        if (proxy_ssl_check_peer_ok != TRUE) {
++        if (proxy_ssl_check_peer_ok != TRUE
++            || (post_handshake_rc != OK && post_handshake_rc != DECLINED)) {
+             /* ensure that the SSL structures etc are freed, etc: */
+             ssl_filter_io_shutdown(filter_ctx, c, 1);
+             apr_table_setn(c->notes, "SSL_connect_rv", "err");
+-            return HTTP_BAD_GATEWAY;
++            return MODSSL_ERROR_BAD_GATEWAY;
+         }
+ 
+         apr_table_setn(c->notes, "SSL_connect_rv", "ok");
