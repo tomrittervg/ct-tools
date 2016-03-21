@@ -9,5 +9,8 @@ for i in $1/*
 do
     echo "================================================================"
     echo "Processing $i"
+    if [ ! -d "$2/`basename -s .pem $i`" ]; then
+	mkdir $2/`basename -s .pem $i`
+    fi
     ./fetchallcerts.py `tail -n 1 $i` --store $2/`basename -s .pem $i` --pub $i
 done

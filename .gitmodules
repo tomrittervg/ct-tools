@@ -1,0 +1,3 @@
+[submodule "pyx509"]
+	path = pyx509
+	url = git@github.com:tomrittervg/pyx509.git
