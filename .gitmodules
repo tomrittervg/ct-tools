@@ -1,3 +1,6 @@
 [submodule "pyx509"]
 	path = pyx509
 	url = git@github.com:tomrittervg/pyx509.git
+[submodule "pyasn1"]
+	path = pyasn1
+	url = git@github.com:tomrittervg/pyasn1.git
