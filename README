@@ -1,3 +1,7 @@
+See:
+- https://ritter.vg/blog-querying_ct_logs.html
+- https://ritter.vg/blog-require_certificate_transparency.html
+
 Certain files from https://git.nordu.net/catlfish.git:
 	certkeys.py
 	certtools.py
