@@ -237,7 +237,8 @@ if __name__ == "__main__":
         result = pool.map_async(process_zipfile, fullworkload)
 
         errors = []
-        results = 0
+        results = []
+        resultCount = 0
         while not result.ready():
             q = 0
             p = 0
@@ -248,16 +249,19 @@ if __name__ == "__main__":
                     q += 1
                 elif zipfilestate[z] == Status.Processing:
                     p += 1
-                elif zipfilestate[z] == Status.Completed:
-                    c += 1
-                    results += resultcount[z]
-                elif zipfilestate[z] == Status.Errored:
-                    e += 1
-                    results += resultcount[z]
-                    if zipfiles[z] not in errors:
-                        print "[!] Caught a unhandle-able error:", zipfiles[z]
-                        errors.append(zipfiles[z])
-            sys.stdout.write("[+] Job Status: " + str(results) + " results. Jobs: "+ str(p) + " in progress, " + str(q) + " queued, " + str(c+e) + " completed (" + str(e) + " Errors).             \r")
+                elif zipfilestate[z] == Status.Completed or zipfilestate[z] == Status.Errored:
+                    if zipfiles[z] not in results:
+                        resultCount += resultcount[z]
+                        results.append(zipfiles[z])
+                    
+                    if zipfilestate[z] == Status.Errored:
+                        e += 1
+                        if zipfiles[z] not in errors:
+                            print "[!] Caught a unhandle-able error:", zipfiles[z]
+                            errors.append(zipfiles[z])
+                    else:
+                        c += 1
+            sys.stdout.write("[+] Job Status: " + str(resultCount) + " results. Jobs: "+ str(p) + " in progress, " + str(q) + " queued, " + str(c+e) + " completed (" + str(e) + " Errors).             \r")
             sys.stdout.flush()
             time.sleep(5)
     else:
