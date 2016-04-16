@@ -6,12 +6,20 @@ import requests
 
 
 LOGS = {
-	'aviator' : "http://ct.googleapis.com/aviator",
-	'pilot' : "http://ct.googleapis.com/pilot",
-	'rocketeer' : "http://ct.googleapis.com/rocketeer",
-	"digicert" : "http://ct1.digicert-ct.com/log",
-	"izenpen" :"http://ct.izenpe.com",
-	"certly" : "http://log.certly.io"
+	'Google \'Pilot\' log' : 'https://ct.googleapis.com/pilot',
+	'Google \'Aviator\' log' : 'https://ct.googleapis.com/aviator',
+	'Google \'Rocketeer\' log' : 'https://ct.googleapis.com/rocketeer',
+	'Certly Log Server' : 'https://log.certly.io',
+	'Symantec Log Server' : 'https://ct.ws.symantec.com',
+	'DigiCert Log Server' : 'https://ct1.digicert-ct.com/log',
+	#'Google \'Submariner\' log' : 'https://ct.googleapis.com/submariner',
+	'Izenpe Log Server' :'https://ct.izenpe.com',
+	'Venafi CT Log Server' : 'https://ctlog.api.venafi.com',
+	'Symantec VEGA Log Server' : 'https://vega.ws.symantec.com',
+	'CNNIC CT Log Server' : 'https://ctserver.cnnic.cn',
+	#'GDCA CT Log Server' : 'https://ct.gdca.com.cn',
+	#'WoSign CT Log Server' : 'https://ct.wosign.com',
+	#'Akamai Log' : 'https://ct.akamai.com',
 }
 
 parser = argparse.ArgumentParser(description='Submit a certificate to logs')
@@ -34,10 +42,11 @@ for c in args.cert:
 
 	
 data =  '{"chain" : ["' + '", "'.join(certdata) + '"]}'
+
 for l in LOGS:
 	if not args.log or l in args.log:
 		try:
-			r = requests.post(LOGS[l] + "/ct/v1/add-chain", data)
+			r = requests.post(LOGS[l] + "/ct/v1/add-chain", data=data, verify=requests.certs.where())
 			if r.status_code != 200:
 				print("Error {0} while submitting to {1}".format(r.status_code, l))
 				print(r.text)
