@@ -46,5 +46,6 @@ for l in LOGS:
 				print(l)
 				print("\tTimestamp", r['timestamp'])
 				print("\tSignature", r['signature'])
-		except:
+		except Exception as e:
 			print("Error communicating with", l)
+			print(e)
