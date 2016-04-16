@@ -39,7 +39,7 @@ for l in LOGS:
 		try:
 			r = requests.post(LOGS[l] + "/ct/v1/add-chain", data)
 			if r.status_code != 200:
-				print("Error while submitting to", l)
+				print("Error {0} while submitting to {1}".format(r.status_code, l))
 				print(r.text)
 			else:
 				r = json.loads(r.text)
