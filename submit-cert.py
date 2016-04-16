@@ -39,12 +39,12 @@ for l in LOGS:
 		try:
 			r = requests.post(LOGS[l] + "/ct/v1/add-chain", data)
 			if r.status_code != 200:
-				print "Error while submitting to", l
-				print r.text
+				print("Error while submitting to", l)
+				print(r.text)
 			else:
 				r = json.loads(r.text)
-				print l
-				print "\tTimestamp", r['timestamp']
-				print "\tSignature", r['signature']
+				print(l)
+				print("\tTimestamp", r['timestamp'])
+				print("\tSignature", r['signature'])
 		except:
-			print "Error communicating with", l
+			print("Error communicating with", l)
