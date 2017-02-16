@@ -10,13 +10,16 @@ LOGS = {
 	'rocketeer' : base64.b64decode("7ku9t3XOYLrhQmkfq+GeZqMPfl+wctiDAMR7iXqo/cs="),
 	'digicert' : base64.b64decode("VhQGmi/XwuzT9eG9RLI+x0Z2ubyZEVzA75SYVdaJ0N0="),
 	'izenpen' : base64.b64decode("dGG0oJz7PUHXUVlXWy52SaRFqNJ3CbDMVkpkgrfrQaM="),
-	'certly' : base64.b64decode("zbUXm3/BwEb+6jETaj+PAC5hgvr4iW/syLL1tatgSQA=")
+	'certly' : base64.b64decode("zbUXm3/BwEb+6jETaj+PAC5hgvr4iW/syLL1tatgSQA="),
+	'venafi' : base64.b64decode("rDua7X+pZ0dXFZ5tfVdWcvnZgQCUHpve/+yhMTt1eC0="),
+        'digicert' : base64.b64decode("VhQGmi/XwuzT9eG9RLI+x0Z2ubyZEVzA75SYVdaJ0N0="),
+        'skydiver' : base64.b64decode("u9nfvB+KcbWTlCOXqpJ7RzhXlQqrUugakJZkNo4e0YU=")
 }
 
 parser = argparse.ArgumentParser(description='Write a SCT')
 parser.add_argument("--out", type=argparse.FileType('w'), help="file to write out to")
 parser.add_argument("--stdout", action="store_true", help="write to stdout, to be used in echo \"...\" | base64 -d > file")
-parser.add_argument("--log", choices=['aviator', 'pilot', 'rocketeer', 'certly', 'digicert', 'izenpen'], required=True)
+parser.add_argument("--log", choices=['aviator', 'pilot', 'rocketeer', 'certly', 'digicert', 'izenpen', 'venafi', 'skydiver', 'digicert'], required=True)
 parser.add_argument("--time", "--timestamp", type=int, required=True, help="Timestamp from the JSON response.")
 parser.add_argument("--sig", type=str, required=True, help="Signature value from the JSON response, base64 encoded")
 
