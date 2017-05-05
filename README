@@ -7,3 +7,5 @@ Certain files from https://git.nordu.net/catlfish.git:
 	certtools.py
 	fetchallcerts.py
 See LICENSE_CATLFISH
+
+See also https://github.com/alex/ct-submitter which also submits certs to logs.
