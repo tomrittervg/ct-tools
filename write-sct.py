@@ -12,7 +12,8 @@ LOGS = {
 	'izenpen' : base64.b64decode("dGG0oJz7PUHXUVlXWy52SaRFqNJ3CbDMVkpkgrfrQaM="),
 	'certly' : base64.b64decode("zbUXm3/BwEb+6jETaj+PAC5hgvr4iW/syLL1tatgSQA="),
 	'venafi' : base64.b64decode("rDua7X+pZ0dXFZ5tfVdWcvnZgQCUHpve/+yhMTt1eC0="),
-        'digicert' : base64.b64decode("VhQGmi/XwuzT9eG9RLI+x0Z2ubyZEVzA75SYVdaJ0N0="),
+        'digicert1' : base64.b64decode("VhQGmi/XwuzT9eG9RLI+x0Z2ubyZEVzA75SYVdaJ0N0="),
+        'digicert2' : base64.b64decode("h3W/51l8+IxDmV+9827/Vo1HVjb/SrVgwbTq/16ggw8="),
         'skydiver' : base64.b64decode("u9nfvB+KcbWTlCOXqpJ7RzhXlQqrUugakJZkNo4e0YU="),
         'icarus' : base64.b64decode("KTxRllTIOWW6qlD8WAfUt2+/WHopctykwwz05UVH9Hg="),
         'vega' : base64.b64decode("vHjh38X2PGhGSTNNoQ+hXwl5aSAJwIG08/aRfz7ZuKU="),
@@ -21,6 +22,12 @@ LOGS = {
         'startssl' : base64.b64decode("NLtq1sPfnAPuqKSZ/3iRSGydXlysktAfe/0bzhnbSO8="),
         'certificatetransparency.cn' : base64.b64decode("4BJ2KekEllZOPQFHmESYqkj4rbFmAOt5AqHvmQmQYnM="),
         'venafigen2' : base64.b64decode("AwGd8/2FppqOvR+sxtqbpz5Gl3T+d/V5/FoIuDKMHWs="),
+        'nimbus2018' : base64.b64decode("23Sv7ssp7LH+yj5xbSzluaq7NveEcYPHXZ1PN7Yfv2Q="),
+        'nimbus2019' : base64.b64decode("dH7agzGtMxCRIZzOJU9CcMK//V5CIAjGNzV55hB7zFY="),
+        'nimbus2020' : base64.b64decode("Xqdz+d9WwOe1Nkh90EngMnqRmgyEoRIShBh1loFxRVg="),
+        'nimbus2021' : base64.b64decode("RJRlLrDuzq/EQAfYqP4owNrmgr7YyzG1P9MzlrW2gag="),
+        'sabre' : base64.b64decode("VYHUwhaQNgFK6gubVzxT8MDkOHhwJQgXL6OqHQcT0ww="),
+        'mammoth' : base64.b64decode("b1N2rDHwMRnYmQCkURX/dxUcEdkCwQApBo2yCJo32RM="),
 }
 
 parser = argparse.ArgumentParser(description='Write a SCT')
@@ -36,7 +43,7 @@ if not args.out and not args.stdout:
     print "\nError: Either --out or --stdout must be specified"
     exit(-1)
 if args.log not in LOGS:
-    print "Error: log not known. Choose one of", str(LOGS.keys())
+    print "Error:", args.log, " log not known. Choose one of", str(LOGS.keys())
     exit(-1)
 
 sct = ""

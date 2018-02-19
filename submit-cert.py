@@ -17,15 +17,23 @@ LOGS = {
 	'rocketeer' : 'https://ct.googleapis.com/rocketeer',
 	'icarus' : 'https://ct.googleapis.com/icarus',
 	'skydiver' : 'https://ct.googleapis.com/skydiver',
+	'nimbus2018' : 'https://ct.cloudflare.com/logs/nimbus2018',
+	'nimbus2019' : 'https://ct.cloudflare.com/logs/nimbus2019',
+	'nimbus2020' : 'https://ct.cloudflare.com/logs/nimbus2020',
+	'nimbus2021' : 'https://ct.cloudflare.com/logs/nimbus2021',
 #	'certly Log Server' : 'https://log.certly.io',
 	'symantec' : 'https://ct.ws.symantec.com',
-	'digicert' : 'https://ct1.digicert-ct.com/log',
+	'digicert1' : 'https://ct1.digicert-ct.com/log',
+	'digicert2' : 'https://ct2.digicert-ct.com/log',
 	#'Google \'Submariner\' log' : 'https://ct.googleapis.com/submariner',
 #	'Izenpe Log Server' :'https://ct.izenpe.com',
 	'venafi' : 'https://ctlog.api.venafi.com',
 	'vega' : 'https://vega.ws.symantec.com',
+	'sirius' : 'https://sirius.ws.symantec.com',
 	'cnnic' : 'https://ctserver.cnnic.cn',
 	'startssl' : 'https://ct.startssl.com',
+	'sabre' : 'https://sabre.ct.comodo.com',
+	'mammoth' : 'https://mammoth.ct.comodo.com',
 	#'GDCA CT Log Server' : 'https://ct.gdca.com.cn',
 	'wosign' : 'https://ct.wosign.com',
 	#'Akamai Log' : 'https://ct.akamai.com',
@@ -67,9 +75,10 @@ for l in LOGS:
 			else:
 				r = json.loads(r.text)
 				print(l)
+				print("\tID", r['id'])
 				print("\tTimestamp", r['timestamp'])
 				print("\tSignature", r['signature'])
-				print("\tCommand: ./write-sct.py --stdout --time " + str(r['timestamp']) + " --sig " + str(r['signature']) + " --log " + l)
+				print("\tCommand: ./write-sct.py --time " + str(r['timestamp']) + " --sig " + str(r['signature']) + " --log " + l)
 		except Exception as e:
 			print("Error communicating with", l)
 			print(e)
